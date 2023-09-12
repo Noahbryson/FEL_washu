@@ -1,0 +1,6 @@
+BCI2kReader
+numpy
+matplotlib
+scipy
+neurokit2
+mne

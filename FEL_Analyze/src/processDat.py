@@ -40,7 +40,7 @@ class processDat():
             out[i][:] = highpass(channel, self.fs, 0.5, 8)
             out[i][:] = lowpass(out[i][:], self.fs, 56, 8)
             if notchOrder:
-                out[i][:] = notch(channel, self.fs, Wn=60, Q=15, order=notchOrder)
+                out[i][:] = notch(channel, self.fs, Wn=60, Q=30, order=notchOrder)
         if commonRef:
             out = self._commonAverageReferene(out)
         return out
@@ -145,12 +145,15 @@ class processDat():
     def whole_block_psds(self):
         fig = plt.figure('PSD')
         ax = plt.subplot2grid((1,1),loc=(0,0))       
+        window = sig.get_window(window='hamming', Nx = int(self.fs))
         for i,chan in enumerate(self.data):
-            f,Pxx = sig.welch(chan,fs = self.fs,window='hamming',nperseg=128, scaling='spectrum',nfft=128) #hemming window
-            f = f[1:]
-            Pxx = Pxx[1:]
-            ax.semilogy(f,Pxx/f)
-        ax.set_xlim(0,1000)
+            f,Pxx = sig.welch(chan,fs = self.fs,window=window, scaling='density') #hamming window
+            # f = f[1:]
+            # Pxx = Pxx[1:]
+            ax.semilogy(f,Pxx, label = f'chan {i}')
+        print(f'freq resolution :{self.fs / (2 *len(f))}')
+        ax.legend()
+        ax.set_xlim(0,100)
             
     def plotStimOn(self,ax=None):
         if ax == None:
@@ -285,25 +288,34 @@ class processDat():
     def epochFFT(self):
         data = self._epochDataByStimuli()
         fig,ax = plt.subplots(len(data),len(self.sigs),num='Epoch FFT',sharex=True, sharey=True)
+        window = sig.get_window(window='hamming', Nx = int(self.fs))
         for j,(face, signals) in enumerate(data.items()):
             for i,(channel,signal) in enumerate(signals.items()):
                 offset = -self.offsetVal*i
                 epochs = []
                 for epoch in signal.values():
-                    f, Pxx = sig.welch(epoch,fs = self.fs,window='hamming',nperseg=128, scaling='spectrum', nfft=128)
-                    f = f[1:]
-                    Pxx = Pxx[1:]
-                    ax[j][i].semilogy(f,Pxx/f,c=(0,0,0),alpha=0.3)
+                    f, Pxx = sig.welch(epoch,fs = self.fs,window=window)
+                    # f = f[1:]
+                    # Pxx = Pxx[1:]
+                    ax[j][i].semilogy(f,Pxx,c=(0,0,0),alpha=0.3)
                     epochs.append(Pxx)
                 avg = np.average(epochs,axis=0)
-                ax[j][i].semilogy(f,avg/f, c = (1,0,0))
-                ax[j][i].set_xlim(1,200)
+                ax[j][i].semilogy(f,avg, c = (1,0,0))
+                ax[j][i].set_xlim(0.1,55)
                 ax[0][i].set_title(f'Chan {i+1}')
             ax[j][0].set_ylabel(f'{face} uV**2/Hz')
         for a in ax.flat:
             a.label_outer()
+        plt.subplots_adjust(
+            left=0.08,
+            right=0.98,
+            top = 0.93,
+            bottom = 0.05,
+            hspace = 0.09,
+            wspace = 0.09
+        )
 
-    def plotPowerBands_oneChannel(self, channel, axes:plt.axes or bool = False, legend:bool=True):
+    def plotPowerBands_oneChannel(self, channel, axes:plt.axes or bool = False, legend:bool=True, order:int = 4):
         """Plots all power bands of one channel on same figure. Channel is 1 indexed list of channels, ax is for an ax to be passed to add this figure to another subplot."""
         if axes:
             title = ''
@@ -314,11 +326,11 @@ class processDat():
          
         channel = channel -1
         data = self.data[channel]
-        delta = getDeltaBand(data,self.fs)
-        theta = getThetaBand(data,self.fs)
-        alpha = getAlphaBand(data,self.fs)
-        beta = getBetaBand(data,self.fs)
-        gamma = getGammaBand(data,self.fs)
+        delta = getDeltaBand(data,self.fs,order)
+        theta = getThetaBand(data,self.fs,order)
+        alpha = getAlphaBand(data,self.fs,order)
+        beta  = getBetaBand( data,self.fs,order)
+        gamma = getGammaBand(data,self.fs,order)
         bands = {'delta':delta, 'theta':theta, 'alpha':alpha, 'beta':beta, 'gamma':gamma}
         c = len(bands)
         colors = sns.color_palette(None,c)

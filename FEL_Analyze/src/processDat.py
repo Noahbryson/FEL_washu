@@ -7,51 +7,171 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib.gridspec import GridSpec
 import neurokit2 as nk
+import mne
+import csv
+import os
 
-class processDat():
-    def __init__(self,path, notchOrder: int = 4, commonRef:bool=True):
-        # plt.style.use('dark_background')
-        with bci.BCI2kReader(path) as fp:
-            self.sigs,self.states = fp.readall()
-            self.states = self._reshapeStates()
-            self.params = fp._parameters()
-            self.StimuliID, self.faceValues = self._getStimuliIDs()
-            self.StimuliLocs = self._getStimuliPresentationLocations()
-            self.fs = self.params['SamplingRate']
-            self.data = self._preprocess(self.sigs.copy(),notchOrder, commonRef)
-            self.stimulusPresented = self.states['StimulusBegin']
-            self.t = np.linspace(0,self.sigs.shape[-1]/self.fs,self.sigs.shape[-1])
-            self.offsetVal = 3*np.std(self.sigs[0]) #uV
-            
-            if 'EstimCurrent' in self.states:
-                self.estim = self.states['EstimStimulus']
-                target = max(self.estim)*0.7
-                self.estimIdx = self._getBoolStateIDXs(self.estim, thresh=target)
-                self.u_s = True
-            else: 
-                self.estim = np.zeros(self.t.shape)
-                self.estimIdx = []
-                self.u_s = False
-            print('End Init')
 
-    def _preprocess(self,data,notchOrder, commonRef:bool = True):
+class eeg():
+    def __init__(self,all_signals,all_labels,fs,notchOrder,commonRef, otherSignals:list =['EMG','GSR','EDA']):
+        self.CoreChanTypes = {'EEG':('AF3', 'AF4', 'C3', 'C4', 'F3', 'F4', 'F7', 'F8', 'Fz', 'O1', 'O2', 'P3', 'P4', 'Pz', 'T7', 'T8'), 'EMG':['EMG'], 'GSR':['GSR']}
+        all_signals = all_signals
+        all_labels = all_labels
+        self.fs = fs
+        notchOrder = notchOrder
+        otherSignals = otherSignals
+        if all_labels:
+            self.chanLabelFlag = True
+        else:
+            self.chanLabelFlag = False
+        self.EEG, self.response_signals = self._isolate_signals(all_signals, all_labels,otherSignals)
+        if commonRef:
+            self.EEG = self._commonAverageReference(self.EEG)
+        self.EEG, self.response_signals = self.preprocessAll(self.EEG,self.response_signals,notchOrder)
+        self.allData = self.EEG | self.response_signals
+        self.allLabels = tuple(self.allData.keys())
+        self.EEGLabels = tuple(self.EEG.keys())
+        print(1)
+    
+    def getChannelTypes(self):
+        output = {}
+        for channel in self.allData:
+            for key,vals in self.CoreChanTypes.items():
+                if channel in vals:
+                    output[channel] = key
+                    break
+                else:
+                    output[channel] = 'sEEG'
+        x,y =  list(output.keys()), [i.lower() for i in output.values()]
+        return x,y
+    def preprocessAll(self,EEG,Response_sigs,notchOrder=4):
+        EEGDat, eegKey = dict_2_numpy(EEG)
+        eeg_keyOrder = sorted(eegKey)
+        EEGDat = self._preprocessEEG(EEGDat,notchOrder)
+        EEG = numpy_2_dict(EEGDat,eegKey)
+        EEGout = {k:EEG[k] for k in eeg_keyOrder}
+        resp_data,resp_key = dict_2_numpy(Response_sigs)
+        respOut = {}
+        for i,key in enumerate(resp_key):
+            if key.find('EMG') >-1:
+                respOut[key] = self._preprocessEMG(resp_data[i],notchOrder) 
+            if key.find('GSR') >-1:
+                respOut[key] = self._preprocessEDA(resp_data[i])
+        return EEGout,respOut
+    def _preprocessEEG(self,data,notchOrder=4, commonRef:bool = True):
         out = np.empty(data.shape)
         for i,channel in enumerate(data):
             out[i][:] = highpass(channel, self.fs, 0.5, 8)
             out[i][:] = lowpass(out[i][:], self.fs, 56, 8)
             if notchOrder:
                 out[i][:] = notch(channel, self.fs, Wn=60, Q=30, order=notchOrder)
-        if commonRef:
-            out = self._commonAverageReferene(out)
         return out
+    def _preprocessEMG(self,data,notchOrder=4, commonRef:bool = True):
+        out = highpass(data, self.fs, 12, 8)
+        out = lowpass(out, self.fs, 500, 8)
+        if notchOrder:
+            out = notch(out, self.fs, Wn=60, Q=60, order=notchOrder)
+        out = out*10**-6 # convert to V
+        return out
+    def _preprocessEDA(self,data):
+        out = highpass(data, self.fs, 0.001, 8)
+        out = lowpass(out, self.fs, 10, 8)
+        out = out*10**6 # convert to uOhm
+        return out
+    def _isolate_signals(self,allData,labels, conds:list =['EMG','GSR','EDA'])->(dict,dict):
+        popList = []
+        EEG_out = {}
+        otherOut = {}
+        if self.chanLabelFlag:
+            for i,lab in enumerate(labels):
+                for cond in conds:
+                    if lab.find(cond) >=0:
+                        popList.append(labels.index(lab))
+            EEG = allData[0:-len(popList)]
+            for lab, chan in zip(labels[0:-len(popList)],EEG):
+                EEG_out[lab] = chan
+            other = allData[-len(popList):]
+            for lab, chan in zip(labels[-len(popList):],other):
+                otherOut[lab] = chan
+        else:
+            EEG = allData
+            for lab,chan in zip(labels,EEG):
+                EEG_out[lab] = chan
+            other = None
+        return EEG_out, otherOut   
+    def _commonAverageReference(self,data):
+        EEG,keys = dict_2_numpy(data)
+        commonAverage = np.average(EEG, axis=0)
+        for i,channel in enumerate(data.values()):
+            EEG[i][:] = channel - commonAverage
+        data =numpy_2_dict(EEG,keys)
+        return data
 
-    def _commonAverageReferene(self,data):
-        commonAverage= np.average(data, axis=0)
-        out = np.empty(data.shape)
-        for i,channel in enumerate(data):
-            out[i][:] = channel - commonAverage
-        return out
-    
+def dict_2_numpy(data):
+    keys = tuple(data.keys())
+    out = np.empty([len(data),len(list(data.values())[0])])
+    for i,value in enumerate(data.values()):
+            out[i][:] = value
+    return out,keys
+def numpy_2_dict(data,keys):
+    out = {}
+    for i, key in enumerate(keys):
+        out[key] = data[i][:]
+    return out
+
+class processDat():
+    import pathlib
+    def __init__(self,path, notchOrder: int = 4, commonRef:bool=True, otherSignals:list =['EMG','GSR','EDA']):
+        # plt.style.use('dark_background')
+        with bci.BCI2kReader(path) as fp:
+            self.params = self._getParams(fp,path)
+            self.sigs,self.states = fp.readall()
+            self.states = self._reshapeStates()
+            self.fs=int(fp._samplingrate())
+        self.chanLabelFlag = len(self.params['ChannelNames'])
+        if self.chanLabelFlag:
+            self.ChanLabs = self.params['ChannelNames']
+        else:
+            self.ChanLabs = [i+1 for i in range(len(self.sigs))]            
+        self.StimuliID, self.faceValues = self._getStimuliIDs()
+        self.StimuliLocs = self._getStimuliPresentationLocations()
+        # self.fs = self.params['SamplingRate']
+        self.dataStruct = eeg(self.sigs,self.ChanLabs,self.fs,notchOrder,commonRef,otherSignals)
+        self.ChanLabs = self.dataStruct.allLabels
+        self.stimulusPresented = self.states['StimulusBegin']
+        self.t = np.linspace(0,self.sigs.shape[-1]/self.fs,self.sigs.shape[-1])
+        self.offsetVal = 3*np.std(self.sigs[0]) #uV
+        
+        if 'EstimCurrent' in self.states:
+            self.estim = self.states['EstimStimulus']
+            target = max(self.estim)*0.7
+            self.estimIdx = self._getBoolStateIDXs(self.estim, thresh=target)
+            self.u_s = True
+        else: 
+            self.estim = np.zeros(self.t.shape)
+            self.estimIdx = []
+            self.u_s = False
+        print('End Init')
+    """Processing Functions"""
+    def _getParams(self, fp:bci.BCI2kReader,path:pathlib.Path):
+        params = fp._parameters()
+        if not 'Stimuli' in params:
+            stimuli = []
+            fname = str(path.name)
+            name = fname.split('.')[0]
+            stimFile = path.parent / f'{name}.csv'
+            if os.path.isfile(stimFile):
+                with open(stimFile,'r') as file:
+                    for line in csv.reader(file):
+                        stimuli.append(line)
+                stimuli.pop(0)
+
+            else:
+                print('Please Run Matlab Function to Generate Stimuli File')
+                exit()
+        params['Stimuli'] = stimuli
+        return params
+
     def _getStimuliIDs(self):
         idxs=[]
         faces = {}
@@ -69,7 +189,7 @@ class processDat():
                 a.append(idx)
                 stimuliVals[face] = a
             else:
-                stimuliVals[face] = [idx]
+                stimuliVals[face] = idx
         return stimuliVals, faces
     
     def _getStimuliPresentationLocations(self):
@@ -77,8 +197,11 @@ class processDat():
         faceArray = {}
         for face, idx in self.StimuliID.items():
             temp = []
-            for val in idx:
-                temp.append(np.where(state == val))
+            if type(idx)==list:
+                for val in idx:
+                    temp.append(np.where(state == val))
+            else:
+                temp.append(np.where(state == idx))
             if len(temp[0][0])>0:
                 faceArray[face] = temp
         return faceArray
@@ -97,40 +220,111 @@ class processDat():
             else:
                 states[state] = val[0]
         return states
-    
-    def visualizeRaw2Col(self):
-        fig,ax = plt.subplots(int(self.sigs.shape[0]/2)+1,2)
-        col = 0
-        row = 0
-        gs = ax[-1,0].get_gridspec()
-        stims = self._getBoolStateIDXs(self.stimulusPresented)
-        for a in ax[-1]:
-            a.remove()
-        for i,chan in enumerate(self.sigs):
-            for stim in stims:
-                ax[row][col].axvline(x=self.t[stim])    
-            ax[row][col].plot(self.t,chan)
-            ax[row][col].plot(self.t,self.data[i])
-            row +=1
-            if i == 7:
-                row = 0
-                col = 1
-        axBig = fig.add_subplot(gs[-1,:])
-        axBig.set_ylim(-.5, 1.5)
-        self.plotStimOn(axBig)
+    def _getStimulusCodeTimeSeries(self):
+        stateTime = {}
+        stateIndexes = {}
+        for face,vals in self.StimuliLocs.items():
+            temp_time = []    
+            temp_idx = []
+            for i in vals:
+                start = 0
+                loc = i[0]
+                t = False
+                for idx,j in enumerate(loc[0:-1]):
+                    if j+1 != loc[idx+1]:
+                        t= True
+                        temp_time.append(self.t[loc[start]:loc[idx]])
+                        temp_idx.append([loc[start],loc[idx]])
+                        start = idx+1
+                if t == False:
+                    temp_time.append(self.t[loc[0]:loc[-1]])
+                    temp_idx.append([loc[0],loc[-1]])
+            stateTime[face] = temp_time
+            stateIndexes[face] = temp_idx
+        return stateTime, stateIndexes
 
+    def _epochDataByStimuli(self):
+        rawdata,rawKeys = dict_2_numpy(self.dataStruct.allData)
+        _, stimIdx = self._getStimulusCodeTimeSeries()
+        popKeys = []
+        keys = list(stimIdx.keys())
+        sliceLen = stimIdx[keys[0]][0][1] - stimIdx[keys[0]][0][0] 
+        for key in stimIdx.keys():
+            if key.find('w shock')>-1:
+                popKeys.append(key)
+        for key in popKeys:
+            stimIdx.pop(key)
+        data = {}
+        for face, val in stimIdx.items():
+            channels = {}
+            for i, channel in enumerate(rawdata):
+                epochs = {}
+                for j,idx in enumerate(val):
+                    epochs[j] = channel[idx[0]:idx[0]+sliceLen]
+                channels[i] = epochs            
+            data[face] = channels
+        return data, rawKeys
+    def generateTriggerChannel(self):
+        trig = np.zeros(len(self.sigs[0]))
+        times, x = self._getStimulusCodeTimeSeries()
+        for face, t in x.items():
+            for r in t:
+                trig[r[0]:r[1]+1] = self.StimuliID[face]
+        trigVals = set(trig)
+        ids = {}
+        values = list(self.StimuliID.values())
+        keys = list(self.StimuliID.keys())
+        for val in trigVals:
+            if val in values and keys[values.index(val)].find('w shock')<0:
+                ids[keys[values.index(val)]] = int(val)
+        return trig , ids
+    def build_MNE_Epochs(self):
+        # testEvents = mne.find_events(self.states['StimulusCode'])
+        # epochs, channels = self._epochDataByStimuli()
+        ch_names, ch_types = self.dataStruct.getChannelTypes()
+        info = mne.create_info(ch_names, self.fs,ch_types)
+        raw, rawChan = dict_2_numpy(self.dataStruct.allData)
+        for i, data in enumerate(raw[0:len(self.dataStruct.EEG)+1]):
+            raw[i][:] = 10**-6*data
+        data = mne.io.RawArray(raw,info)
+        # data.plot()
+        events, all_events, ids = self.getMNEvents()
+        print(len(all_events))
+        epochs = mne.Epochs(data,all_events,baseline=None,detrend=1,tmin=-0.2,tmax=2.5, event_id=ids)
+        epochs.plot(n_epochs=20,n_channels=4,events=True,scalings=None)
+        plt.show()
+        return 0
+    
+    def getMNEvents(self):
+        eventInfo = mne.create_info(['stim'],self.fs,['stim'])
+        # stimData = np.round(self.states['StimulusCode'],0)
+        stimData, ids = self.generateTriggerChannel()
+        stim = np.empty([1,len(stimData)])
+        stim[0][:] = stimData
+        eventRaw = mne.io.RawArray(stim,eventInfo)
+        all_events = mne.find_events(eventRaw,consecutive=False)
+        meaningful = list(self.StimuliID.values())[0:-3]
+        event_list = []
+        for i,event in enumerate(all_events):
+            if event[1] in meaningful:
+                event_list.append(event)
+        event_list = np.array(event_list)
+        return event_list, all_events, ids
+
+    """Visualization Functions"""
     def VisualizeRawOffset(self):
+        data = self.dataStruct.EEG
         fig = plt.figure('Offset EEG Channels')
         ax = plt.subplot2grid((10,1),loc=(0,0),rowspan=9)
         colors = ('black', 'orange')
         for stim in self.estimIdx:
             ax.axvline(x=self.t[stim], c=colors[0])        
-        for i,chan in enumerate(self.data):
+        for i,(lab,chan) in enumerate(data.items()):
             if i%4 == 0:
                 c = colors[1]
             else:
                 c = colors[0]
-            ax.plot(self.t,chan+(self.offsetVal*i), c=c, alpha=0.9)
+            ax.plot(self.t,chan+(self.offsetVal*i), c=c, alpha=0.9,label = lab)
         ax.set_ylabel('uV')
         ax2 = plt.subplot2grid((10,1),loc=(9,0))
         ax2.set_xlabel('Time (s)')
@@ -140,30 +334,28 @@ class processDat():
         ax.get_shared_x_axes().join(ax,ax2)
         fig.add_axes(ax)
         fig.add_axes(ax2)
-        fig.suptitle('Raw EEG during FEL Acquisition')
-        
+        fig.suptitle('Raw EEG during FEL Acquisition')        
     def whole_block_psds(self):
+        data = self.dataStruct.EEG
         fig = plt.figure('PSD')
         ax = plt.subplot2grid((1,1),loc=(0,0))       
         window = sig.get_window(window='hamming', Nx = int(self.fs))
-        for i,chan in enumerate(self.data):
+        for i,chan in enumerate(data):
             f,Pxx = sig.welch(chan,fs = self.fs,window=window, scaling='density') #hamming window
             # f = f[1:]
             # Pxx = Pxx[1:]
-            ax.semilogy(f,Pxx, label = f'chan {i}')
+            ax.semilogy(f,Pxx, label = self.ChanLabs[i])
         print(f'freq resolution :{self.fs / (2 *len(f))}')
         ax.legend()
-        ax.set_xlim(0,100)
-            
+        ax.set_xlim(0,100)            
     def plotStimOn(self,ax=None):
         if ax == None:
-            fig, ax = plt.subplots(1,1,num='StimOn')
+            fig, ax = plt.subplots(1,1,num='StimPresentation')
         ax.plot(self.t,self.stimulusPresented)
-    def plotEstim(self,ax=None):
+    def plotEstimOn(self,ax=None):
         if ax == None:
-            fig, ax = plt.subplots(1,1,num='Estim')
+            fig, ax = plt.subplots(1,1,num='EstimOn')
         ax.plot(self.t,self.estim)
-
     def plotAllStates(self):
         rows = len(self.states)
         fig = plt.figure('states')
@@ -192,9 +384,9 @@ class processDat():
                         y = value*y
                         ax.plot(vals,y, c=colors[count])
                     count +=1
-
     def plotStimulusCode(self, ax=None):
         state = self.states['StimulusCode']
+        state,_ = self.generateTriggerChannel()
         if ax == None:
             fig, ax = plt.subplots(1,1,num='stimCode')
         ax.plot(self.t,state,c=(0,0,0),alpha = 0.5, linewidth=0.5)
@@ -215,52 +407,8 @@ class processDat():
             count +=1
         ax.legend()
 
-    def _getStimulusCodeTimeSeries(self):
-        stateTime = {}
-        stateIndexes = {}
-        for face,vals in self.StimuliLocs.items():
-            temp_time = []    
-            temp_idx = []
-            for i in vals:
-                start = 0
-                loc = i[0]
-                t = False
-                for idx,j in enumerate(loc[0:-1]):
-                    if j+1 != loc[idx+1]:
-                        t= True
-                        temp_time.append(self.t[loc[start]:loc[idx]])
-                        temp_idx.append([loc[start],loc[idx]])
-                        start = idx+1
-                if t == False:
-                    temp_time.append(self.t[loc[0]:loc[-1]])
-                    temp_idx.append([loc[0],loc[-1]])
-            stateTime[face] = temp_time
-            stateIndexes[face] = temp_idx
-        return stateTime, stateIndexes
-
-    def _epochDataByStimuli(self):
-        _, stimIdx = self._getStimulusCodeTimeSeries()
-        popKeys = []
-        keys = list(stimIdx.keys())
-        sliceLen = stimIdx[keys[0]][0][1] - stimIdx[keys[0]][0][0] 
-        for key in stimIdx.keys():
-            if key.find('w shock')>-1:
-                popKeys.append(key)
-        for key in popKeys:
-            stimIdx.pop(key)
-        data = {}
-        for face, val in stimIdx.items():
-            channels = {}
-            for i, channel in enumerate(self.data):
-                epochs = {}
-                for j,idx in enumerate(val):
-                    epochs[j] = channel[idx[0]:idx[0]+sliceLen]
-                channels[i] = epochs            
-            data[face] = channels
-        return data  
-
     def plotEpochs(self):
-        data = self._epochDataByStimuli()
+        data, channels = self._epochDataByStimuli()
         for face, signals in data.items():
             fig,ax = plt.subplots(1,1,num=face)
             for i,(channel,signal) in enumerate(signals.items()):
@@ -272,38 +420,73 @@ class processDat():
                 avg = np.average(epochs,axis=0)
                 ax.plot(avg+offset, c = (1,0,0))
     def plotEpochsSubplot(self):
-        data = self._epochDataByStimuli()
-        fig,ax = plt.subplots(1,len(data),num='AllEpochs',sharex=True)
-        for j,(face, signals) in enumerate(data.items()):
-            for i,(channel,signal) in enumerate(signals.items()):
+        data,channels = self._epochDataByStimuli()
+        fig,ax = plt.subplots(len(data),len(self.sigs),num='AllEpochs',sharex=True,sharey=True)
+        for i,(face, signals) in enumerate(data.items()):
+            for j,(channel,signal) in enumerate(signals.items()):
                 offset = -self.offsetVal*i
                 epochs = []
                 for epoch in signal.values():
-                    ax[j].plot(epoch+offset,c=(0,0,0),alpha=0.3)
+                    # ax[i][j].plot(epoch,c=(0,0,0),alpha=0.3)
                     epochs.append(epoch)
-                avg = np.average(epochs,axis=0)
-                ax[j].plot(avg+offset, c = (1,0,0))
-                ax[j].set_title(face)
-
+                avg = np.median(epochs,axis=0)
+                ax[i][j].plot(avg, c = (1,0,0))
+                ax[0][j].set_title(self.ChanLabs[j])
+            ax[i][0].set_ylabel(face)
+            labList = face.split("_")
+            labList[-1] = labList[-1].split('.')[0] 
+            if j > 3:
+                labList[-1] = labList[-1] + ' stim'
+            dec = labList[-1]
+            ax[i][0].set_ylabel(f'{dec}\nuV**2/Hz')
+            ax[i][0].yaxis.set_label_coords(-0.7, 0.5)
+        # for a in ax.flat:
+        #     a.set_ylim(-100,100)
+        plt.subplots_adjust(
+            left=0.08,
+            right=0.98,
+            top = 0.93,
+            bottom = 0.05,
+            hspace = 0.09,
+            wspace = 0.09
+        )
     def epochFFT(self):
-        data = self._epochDataByStimuli()
-        fig,ax = plt.subplots(len(data),len(self.sigs),num='Epoch FFT',sharex=True, sharey=True)
-        window = sig.get_window(window='hamming', Nx = int(self.fs))
-        for j,(face, signals) in enumerate(data.items()):
-            for i,(channel,signal) in enumerate(signals.items()):
-                offset = -self.offsetVal*i
+        data,channels = self._epochDataByStimuli()
+        fig,ax = plt.subplots(len(data),len(self.sigs),num='Epoch FFT',sharex='col', sharey=True)
+        window = sig.get_window(window='hamming', Nx = int(self.fs/2))
+        for i,(face, signals) in enumerate(data.items()):
+            
+            for j,(epoch,signal) in enumerate(signals.items()):
+                channel = channels[j]
+                offset = -self.offsetVal*j
                 epochs = []
                 for epoch in signal.values():
                     f, Pxx = sig.welch(epoch,fs = self.fs,window=window)
                     # f = f[1:]
                     # Pxx = Pxx[1:]
-                    ax[j][i].semilogy(f,Pxx,c=(0,0,0),alpha=0.3)
+                    ax[i][j].semilogy(f,Pxx,c=(0,0,0),alpha=0.3)
                     epochs.append(Pxx)
                 avg = np.average(epochs,axis=0)
-                ax[j][i].semilogy(f,avg, c = (1,0,0))
-                ax[j][i].set_xlim(0.1,55)
-                ax[0][i].set_title(f'Chan {i+1}')
-            ax[j][0].set_ylabel(f'{face} uV**2/Hz')
+                med = np.median(epochs,axis=0)
+                ax[i][j].semilogy(f,avg, c = (1,0,0))
+                ax[i][j].semilogy(f,med, c = (0,0.5,0.5))
+                if channel.find('GSR')>-1:
+                    ax[i][j].set_xlim(0,10)
+                elif channel.find('EMG')>-1:
+                    ax[i][j].set_xlim(12,500)
+                else:
+                    ax[i][j].set_xlim(0.1,55)
+                if self.chanLabelFlag:
+                    ax[0][j].set_title(f'{channel}')
+                else:
+                    ax[0][j].set_title(f'Chan {j+1}')
+            labList = face.split("_")
+            labList[-1] = labList[-1].split('.')[0] 
+            if i > 3:
+                labList[-1] = labList[-1] + ' stim'
+            dec = labList[-1]
+            ax[i][0].set_ylabel(f'{dec}\nuV**2/Hz')
+            ax[i][0].yaxis.set_label_coords(-0.7, 0.5)
         for a in ax.flat:
             a.label_outer()
         plt.subplots_adjust(
@@ -314,7 +497,6 @@ class processDat():
             hspace = 0.09,
             wspace = 0.09
         )
-
     def plotPowerBands_oneChannel(self, channel, axes:plt.axes or bool = False, legend:bool=True, order:int = 4):
         """Plots all power bands of one channel on same figure. Channel is 1 indexed list of channels, ax is for an ax to be passed to add this figure to another subplot."""
         if axes:
@@ -325,7 +507,7 @@ class processDat():
             fig, ax = plt.subplots(1,1,num =title)
          
         channel = channel -1
-        data = self.data[channel]
+        data = self.all_signals[channel]
         delta = getDeltaBand(data,self.fs,order)
         theta = getThetaBand(data,self.fs,order)
         alpha = getAlphaBand(data,self.fs,order)
@@ -350,7 +532,6 @@ class processDat():
         ax.set_ylim(-(i+1)*offset, offset)
         if legend:
             ax.legend()
-
     def show(self):
         plt.show()
 

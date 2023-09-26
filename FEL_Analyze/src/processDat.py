@@ -76,7 +76,7 @@ class eeg():
     def _preprocessEDA(self,data):
         out = highpass(data, self.fs, 0.001, 8)
         out = lowpass(out, self.fs, 10, 8)
-        out = out*10**6 # convert to uOhm
+        # out = out*10**3 # convert to mOhm
         return out
     def _isolate_signals(self,allData,labels, conds:list =['EMG','GSR','EDA'])->(dict,dict):
         popList = []
@@ -279,16 +279,14 @@ class processDat():
                 ids[keys[values.index(val)]] = int(val)
         return trig , ids
     def build_MNE_Epochs(self):
-        # testEvents = mne.find_events(self.states['StimulusCode'])
-        # epochs, channels = self._epochDataByStimuli()
         ch_names, ch_types = self.dataStruct.getChannelTypes()
         info = mne.create_info(ch_names, self.fs,ch_types)
         raw, rawChan = dict_2_numpy(self.dataStruct.allData)
         for i, data in enumerate(raw[0:len(self.dataStruct.EEG)+1]):
             raw[i][:] = 10**-6*data
         data = mne.io.RawArray(raw,info)
-        # data.plot()
         events, all_events, ids = self.getMNEvents()
+        data.plot(events=all_events, event_id=ids,scalings='auto')
         print(len(all_events))
         epochs = mne.Epochs(data,all_events,baseline=None,detrend=1,tmin=-0.2,tmax=2.5, event_id=ids)
         epochs.plot(n_epochs=20,n_channels=4,events=True,scalings=None)
@@ -406,7 +404,6 @@ class processDat():
                 lab = '_'
             count +=1
         ax.legend()
-
     def plotEpochs(self):
         data, channels = self._epochDataByStimuli()
         for face, signals in data.items():

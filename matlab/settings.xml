@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Dependencies>
+   <Dependency Name="Freesurfer" Type="folder">"C:\\freesurfer\\freesurfer"</Dependency>
+   <Dependency Name="NeuralAct" Type="folder">"C:\\NeuralAct_package"</Dependency>
+   <Dependency Name="ProjectDefaultPath" Type="folder">"C:\\Users\\schalklab\\Desktop\\VERA_Subjects"</Dependency>
+   <Dependency Name="ReportGenerator" Type="folder">"C:\\ReportGenerator-master"</Dependency>
+   <Dependency Name="SPM12" Type="folder">"C:\\spm12"</Dependency>
+   <Dependency Name="UbuntuSubsystemPath" Type="folder">"\\mnt\\"</Dependency>
+</Dependencies>

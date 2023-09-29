@@ -1,0 +1,7 @@
+# Changelog
+This file contains any changes to this source code as of 9/1/2023
+
+## Changes 9/1/23
+- Changed FEL parm generators w/ and w/o eyetracking to get local userPath to the BOX drive rather than having it hardcoded. 
+	- This will allow for this script to be run on any machine with box desktop installed (that has access to the FEL folder ofc). 
+	- tested on a windows machine, will need to verify on Unix machines. 

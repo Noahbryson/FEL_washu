@@ -12,7 +12,7 @@ import csv
 import os
 
 
-class eeg():
+class biosignals():
     def __init__(self,all_signals,all_labels,fs,notchOrder,commonRef, otherSignals:list =['EMG','GSR','EDA']):
         self.CoreChanTypes = {'EEG':('AF3', 'AF4', 'C3', 'C4', 'F3', 'F4', 'F7', 'F8', 'Fz', 'O1', 'O2', 'P3', 'P4', 'Pz', 'T7', 'T8'), 'EMG':['EMG'], 'GSR':['GSR']}
         all_signals = all_signals
@@ -106,6 +106,58 @@ class eeg():
             EEG[i][:] = channel - commonAverage
         data =numpy_2_dict(EEG,keys)
         return data
+class eyetracking():
+    def __init__(self):
+        self.exists = False
+    def setData(self,data,fs):
+        states = {}
+        if 'EyetrackerTime' in data.keys():
+            self.exists = True
+            self.fs = fs
+            for key,val in data.items():
+                if key.find('Eyetracker') >-1:
+                    states[key] = val
+            self.t = np.linspace(0,len(val)/fs,len(val))
+        else:
+            print('No Eyetracker Data')
+        self.formatData(states)
+    def formatData(self,states):
+        self.attrs = ('Validity','Pos','Size','Dist','Gaze')
+        sides = ('Left', 'Right')
+        # self.Pos, self.Validity, self.Size, self.Dist, self.Gaze = {},{},{},{},{}
+        for i in self.attrs:
+            temp = {}
+            for key,val in states.items():
+                if key.find(i) > -1:
+                    key = key.replace('Eyetracker','')
+                    temp[key] = val
+            setattr(self,i,temp)
+    
+    def plotAttr(self,attr, ax:plt.axes=False, smooth:bool=True, dec:str= ''):
+        if type(ax) == bool:
+            fig, ax = plt.subplots(1,1,num=f'{attr} {dec}')
+        data = getattr(self,attr)
+        for key,val in data.items():
+            if key.find('Size')>-1 and smooth == True:
+                smooth = savitzky_golay(val,1001,1,0)
+                smooth = windowed_EMavg(val,windowLen=50,smoothing=0.5)
+                print(val == smooth)
+                ax.plot(self.t,smooth,label=f'{key} sm')
+                # val = highpass(val,self.fs,0.2,2)
+                # ax.plot(self.t,savitzky_golay(smooth,101,5,1),label=f'{key} hp')
+            else:
+                ax.plot(self.t,val,label=key)
+        ax.legend()
+    def plotAllAttr(self, subplot:bool=True):
+        if subplot:
+            fig, ax = plt.subplots(len(self.attrs),1, num='Eyetracking Data',sharex=True)
+            for i,attr in enumerate(self.attrs):
+                self.plotAttr(attr,ax=ax[i])
+        else:
+            for attr in self.attrs:
+                self.plotAttr(attr)
+        
+    
 
 def dict_2_numpy(data):
     keys = tuple(data.keys())
@@ -123,11 +175,13 @@ class processDat():
     import pathlib
     def __init__(self,path, notchOrder: int = 4, commonRef:bool=True, otherSignals:list =['EMG','GSR','EDA']):
         # plt.style.use('dark_background')
+        self.eyetracking = eyetracking()
         with bci.BCI2kReader(path) as fp:
             self.params = self._getParams(fp,path)
             self.sigs,self.states = fp.readall()
             self.states = self._reshapeStates()
             self.fs=int(fp._samplingrate())
+        self.eyetracking.setData(self.states,self.fs)
         self.chanLabelFlag = len(self.params['ChannelNames'])
         if self.chanLabelFlag:
             self.ChanLabs = self.params['ChannelNames']
@@ -136,7 +190,7 @@ class processDat():
         self.StimuliID, self.faceValues = self._getStimuliIDs()
         self.StimuliLocs = self._getStimuliPresentationLocations()
         # self.fs = self.params['SamplingRate']
-        self.dataStruct = eeg(self.sigs,self.ChanLabs,self.fs,notchOrder,commonRef,otherSignals)
+        self.dataStruct = biosignals(self.sigs,self.ChanLabs,self.fs,notchOrder,commonRef,otherSignals)
         self.ChanLabs = self.dataStruct.allLabels
         self.stimulusPresented = self.states['StimulusBegin']
         self.t = np.linspace(0,self.sigs.shape[-1]/self.fs,self.sigs.shape[-1])
@@ -278,20 +332,31 @@ class processDat():
             if val in values and keys[values.index(val)].find('w shock')<0:
                 ids[keys[values.index(val)]] = int(val)
         return trig , ids
-    def build_MNE_Epochs(self):
+    def build_MNE_Epochs(self, plotRaw:bool=False,plotEpochs:bool=False):
+        montage = mne.channels.make_standard_montage('easycap-M1')
         ch_names, ch_types = self.dataStruct.getChannelTypes()
         info = mne.create_info(ch_names, self.fs,ch_types)
         raw, rawChan = dict_2_numpy(self.dataStruct.allData)
         for i, data in enumerate(raw[0:len(self.dataStruct.EEG)+1]):
             raw[i][:] = 10**-6*data
         data = mne.io.RawArray(raw,info)
+        data.set_montage(montage)
         events, all_events, ids = self.getMNEvents()
-        data.plot(events=all_events, event_id=ids,scalings='auto')
+        if plotRaw:
+            data.plot(events=all_events, event_id=ids,scalings='auto')
         print(len(all_events))
         epochs = mne.Epochs(data,all_events,baseline=None,detrend=1,tmin=-0.2,tmax=2.5, event_id=ids)
-        epochs.plot(n_epochs=20,n_channels=4,events=True,scalings=None)
-        plt.show()
-        return 0
+        if plotEpochs:
+            epochs.plot(n_epochs=20,n_channels=4,events=True,scalings=None)
+        return epochs
+        
+    def MNE_evoked(self):
+        epochs = self.build_MNE_Epochs()
+        events = epochs.event_id
+        evoked = {}
+        for key in events:
+            evoked[key] = epochs[key].average()
+        return evoked
     
     def getMNEvents(self):
         eventInfo = mne.create_info(['stim'],self.fs,['stim'])
@@ -529,6 +594,26 @@ class processDat():
         ax.set_ylim(-(i+1)*offset, offset)
         if legend:
             ax.legend()
+    
+    def plotEvokedPSD(self):
+        evk = self.MNE_evoked()
+        fig,ax = plt.subplots(len(evk),1,num='evoked')
+        for i,(event,dat) in enumerate(evk.items()):
+            dat.plot_psd(axes=ax[i])
+            ax[i].set_xlim([0,55])
+    
+    def plotEvokedTopo(self,numTimes = 6):
+        evk=self.MNE_evoked()
+        manualTimes = np.array([-0.2, 0.05, 1, 2, 2.3, 2.4, 2.5])
+        times = np.linspace(-.2,2.5,numTimes)
+        numTimes = len(manualTimes)
+        times = manualTimes
+        fig,ax = plt.subplots(len(evk),numTimes+1,num='evoked topo')
+        for i,(ev, dat) in enumerate(evk.items()):
+
+            dat.plot_topomap(ch_type='eeg', times=times,colorbar=True,axes=ax[i][:])
+            ax[i][0].set_ylabel(ev.split('.')[0])
+
     def show(self):
         plt.show()
 

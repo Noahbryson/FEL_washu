@@ -341,11 +341,13 @@ class processDat():
             raw[i][:] = 10**-6*data
         data = mne.io.RawArray(raw,info)
         data.set_montage(montage)
+        data.set_eeg_reference(['Cz'])
         events, all_events, ids = self.getMNEvents()
         if plotRaw:
             data.plot(events=all_events, event_id=ids,scalings='auto')
         print(len(all_events))
-        epochs = mne.Epochs(data,all_events,baseline=None,detrend=1,tmin=-0.2,tmax=2.5, event_id=ids)
+        epochs = mne.Epochs(data,all_events,detrend=1,tmin=-0.2,tmax=2.5, event_id=ids)
+        epochs.apply_baseline(baseline=(None,0))
         if plotEpochs:
             epochs.plot(n_epochs=20,n_channels=4,events=True,scalings=None)
         return epochs

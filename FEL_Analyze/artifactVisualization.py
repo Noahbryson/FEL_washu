@@ -2,11 +2,12 @@ from src.processDat import processDat
 from pathlib import Path
 BCI2kPath = Path("C:\BCI2000.x64\data")
 dataPath = BCI2kPath / "NoahTesting000" /"NoahTestingS000R24.dat"
-t = processDat(dataPath,notchOrder = 4, commonRef=False)
+t = processDat(dataPath,notchOrder = 2, commonRef=False)
 # t.plotStimOn()
 # t.generateTriggerChannel()
-t.plotEvokedTopo()
-t.plotEvokedPSD()
+t.build_MNE_Epochs(plotEpochs=True)
+# t.plotEvokedTopo()
+# t.plotEvokedPSD()
 # t.eyetracking.plotAttr('Size',dec='Smooth')
 # t.eyetracking.plotAttr('Size',smooth=False)
 # t.eyetracking.plotAllAttr(subplot=True)

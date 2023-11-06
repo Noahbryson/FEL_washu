@@ -57,7 +57,7 @@ for i = 1:length(BCI2000pathparts)-2
 end
 BCI200path='C:\BCI2000.x64';
 % Enter Subject ID
-subjectID = 'NoahTesting';
+subjectID = 'BJH042';
 % BCI2000path = 'C:\BCI2000.x64';
 settings.BCI2000path = BCI2000path;
 clear BCI2000path BCI2000pathparts i 
@@ -99,7 +99,7 @@ end
 
 % audpath = 'C:\Users\schalklab\Box\FEL paradigm\Stimuli\sounds\whitenoise.wav';
 audpath = dir(strcat(paradigmDir,'\Stimuli\sounds\train.wav'));
-audio = strcat(paradigmDir,'\Stimuli\sounds\train.wav');
+audio = strcat(paradigmDir,'\Stimuli\sounds\whitenoise_64.wav');
 % Set up the different stimuli so they are represented by unique stimulus codes, separated into banks for easy evaluation later
 n_stimuli = 100; % Total events
 n_rows    = 8;

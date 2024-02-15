@@ -1,0 +1,131 @@
+%% facemorphStim_parseHitRate
+% Noah Bryson 1/30/2024, National Center for Adaptive Neurotechnologies.
+% function to parse hit rate during the face morph stim titration task
+% this function runs in matlab, or as a standalone executable
+%% Compiling
+%   to compile this, enter this command in your command window:
+%           mcc -m facemorphStim_parseHitRate.m -a BCI2000PATH\tools\matlab -a BCI2000PATH\tools\mex
+%   BE SURE THAT YOU SELECT THE CORRECT BCI2000 PATH.
+%   For example, the path on my machine:
+%           mcc -m facemorphStim_parseHitRate.m -a C:\BCI2000.x64\tools\matlab -a C:\BCI2000.x64\tools\mex
+%   Compilation will occur in the current directory of your matlab terminal
+%% Running
+%   upon running the script or executable, the file explorer will open. 
+%   navigate to the directory where your .dat file is and select it.
+%   the result will be a figure with 3 panels, showing FP/TP/FN/TN, stimOn
+%   hit and miss, and stimOff hit and miss. 
+%% Code
+function value_counts = facemorphStim_parseHitRate
+% loadBCI2kTools;
+[fname, pname] = uigetfile('*.dat');
+if isequal(fname,0) || isequal(pname,0)
+    disp('User canceled or closed the dialog box.');
+    error('no valid fp, ending');
+else
+    fp = fullfile(pname,fname);
+end
+[~,states,parameters] = load_bcidat(fp); % load dat file
+
+% EEG lab stuff
+%signal       = signal(:,1)';
+%EEG = pop_importdata('subject',glbPar.ID,'srate',parameters.SamplingRate.NumericValue,'dataformat','array','data','signal');
+
+
+%% get trigger information
+stimuli       = parameters.Stimuli;
+stimulusCode  = double(states.StimulusCode);
+stimulusBegin = double(states.StimulusBegin);
+[~,stimulusBeginLoc] = findpeaks(stimulusBegin);
+stimulusBeginLoc(end+1) = length(stimulusBegin);
+label = getStimParams(parameters);
+%% Parse Event for Hit rates
+noStim = 37; % left arrow is 37
+Stim = 39; % right arrow is 39
+evt=struct; k=0;
+for i = 1:length(stimulusBeginLoc)-1
+    val     = stimulusCode(stimulusBeginLoc(i));
+    stimTyp = stimuli.Value{6,val};
+
+    if strcmp(stimTyp,'StimOff') || strcmp(stimTyp,'StimOn')
+        k = k+1;
+        keyRng     = stimulusBeginLoc(i+1):stimulusBeginLoc(i+2)-1;
+        keyRngCode = stimulusCode(keyRng); %figure; plot(keyRngCode)
+        keyRng   = keyRng(keyRngCode==3);
+        keyDat   = double(states.KeyDown(keyRng)); %figure;plot(keyDat)
+        if isempty(keyDat); error('!'); end
+        keyPkVal = findpeaks(keyDat,'MinPeakHeight',10);
+        if isempty(keyPkVal); keyPkVal=0; end
+        evt(k).type{1}    = stimTyp;
+
+        if keyPkVal(1) == Stim && strcmp(stimTyp,'StimOff')
+            res = 'FP'; hit = false;
+        elseif keyPkVal(1) == Stim && strcmp(stimTyp,'StimOn')
+            res = 'TP'; hit = true;
+        elseif keyPkVal(1) == noStim && strcmp(stimTyp,'StimOn')
+            res = 'FN'; hit = false;
+        else
+            res = 'TN'; hit = true;
+        end
+        evt(k).result = res;
+        evt(k).hit = hit;
+        evt(k).latency(1) = stimulusBeginLoc(i);
+        evt(k).choice     = keyPkVal(1);
+    end
+end
+res = cell(length(evt),1);
+for i=1:length(evt)
+    res{i} = evt(i).result;
+end
+%% Get Value Counts, Hits and Misses
+value_counts = valueCount(res);
+% stimOn query
+target= 'StimOn';
+indicies_on = arrayfun(@(x) strcmp(x.type,target), evt);
+evt_on = evt(indicies_on);
+hit_on = length(find(arrayfun(@(x) x.hit, evt_on)));
+miss_on = length(evt_on) - hit_on;
+% stimOff query
+target ='StimOff';
+indicies_off = arrayfun(@(x) strcmp(x.type,target), evt);
+evt_off = evt(indicies_off);
+hit_off = length(find(arrayfun(@(x) x.hit, evt_off)));
+miss_off = length(evt_off) - hit_off;
+
+%% Generate Figures
+figure(1)
+subplot(1,3,1)
+x = categorical({value_counts{1:end-1}});
+y = value_counts{end};
+bar(x,y)
+ylim([0,10])
+title(label)
+subplot(1,3,2)
+x = categorical({'HIT','MISS'});
+y = [hit_on,miss_on];
+b=bar(x,y);
+b.FaceColor = 'flat';
+b.CData(1,:) = [0 0 0];
+b.CData(2,:) = [1 0 0];
+ylim([0,10])
+title('Stim On')
+subplot(1,3,3)
+y = [hit_off,miss_off];
+b=bar(x,y);
+b.FaceColor = 'flat';
+b.CData(1,:) = [0 0 0];
+b.CData(2,:) = [1 0 0];
+ylim([0,10])
+title('Stim Off')
+%% Supporting Functions
+    function value_counts = valueCount(A)
+        [unique_elements, ~, idx] = unique(A);
+        counts = histcounts(idx, 1:length(unique_elements)+1);
+        value_counts = [unique_elements', counts']; % Combine unique values with their counts
+    end
+
+    function label = getStimParams(param)
+        freq = param.StimulationConfigurations.NumericValue(7,1);
+        amp = param.StimulationConfigurations.NumericValue(3,1);
+        label = sprintf('%d uA, %d Hz',amp,freq );
+    end
+end
